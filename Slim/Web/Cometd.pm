@@ -149,10 +149,17 @@ sub handler {
 		$log->debug( "Cometd request ($peer): " . Data::Dump::dump( $objs ) );
 	}
 
+	# Reset long-polling transport
+	if ( $conn->[HTTP_CLIENT]->transport == 'long-polling' ) {
+		# $log->error("reset long-polling transport");
+		$conn->[HTTP_CLIENT]->transport( '' );
+	}
+
 	my $clid;
 	my $events = [];
 	my @errors;
 	my $delayedResponse; # false if we want to call sendResponse at the end of this method
+	my $preserveConnection;
 
 	for my $obj ( @{$objs} ) {
 		if ( ref $obj ne 'HASH' ) {
@@ -452,10 +459,13 @@ sub handler {
 
 							# We might be in delayed response mode, but we don't want to delay
 							# this non-async data
+							# $log->error("/slim/subscribe - delayedResponse mode: $delayedResponse");
 							$delayedResponse = 0;
+							$preserveConnection = 1;
 						}
 						else {
 							$manager->deliver_events( $result );
+							# $log->error("/slim/subscribe - deliver_events");
 						}
 					}
 				}
@@ -566,9 +576,11 @@ sub handler {
 						# If the request was not async, tell the manager to deliver the results to all subscribers
 						if ( exists $result->{data} ) {
 							if ( $conn->[HTTP_CLIENT]->transport && $conn->[HTTP_CLIENT]->transport eq 'long-polling' ) {
+								# $log->error("/slim/request - long-polling");
 								push @{$events}, $result;
 							}
 							else {
+								# $log->error("/slim/request - deliver_events");
 								$manager->deliver_events( $result );
 							}
 						}
@@ -618,12 +630,12 @@ sub handler {
 		$manager->queue_events( $clid, $events );
 	}
 	else {
-		sendResponse( @{$conn}, $events );
+		sendResponse( @{$conn}, $events, $preserveConnection );
 	}
 }
 
 sub sendResponse {
-	my ( $httpClient, $httpResponse, $out ) = @_;
+	my ( $httpClient, $httpResponse, $out, $preserveConnection ) = @_;
 
 	$out ||= [];
 
@@ -642,7 +654,7 @@ sub sendResponse {
 			Slim::Utils::Timers::killTimers($httpClient, \&sendResponse);
 		}
 
-		sendHTTPResponse( $httpClient, $httpResponse, $out );
+		sendHTTPResponse( $httpClient, $httpResponse, $out, $preserveConnection );
 	}
 	else {
 		# For CLI, don't send anything if there are no events
@@ -653,7 +665,7 @@ sub sendResponse {
 }
 
 sub sendHTTPResponse {
-	my ( $httpClient, $httpResponse, $out ) = @_;
+	my ( $httpClient, $httpResponse, $out, $preserveConnection ) = @_;
 
 	my $isDebug = main::DEBUGLOG && $log->is_debug;
 
@@ -663,6 +675,7 @@ sub sendHTTPResponse {
 	$httpResponse->header( 'Cache-Control' => 'no-cache' );
 	$httpResponse->header( 'Content-Type' => 'application/json' );
 
+#	if ( !$preserveConnection && $httpClient->transport && $httpClient->transport eq 'long-polling' ) {
 	if ( $httpClient->transport && $httpClient->transport eq 'long-polling' ) {
 		# Remove the active connection info from manager until
 		# the client makes a new /meta/(re)?connect request
@@ -780,6 +793,9 @@ sub handleRequest {
 			my $callback = sub {
 				my $request = shift;
 
+				my $clientId = $request->client->id;
+				# $log->error("cometd callback - mac: $mac, client id: $clientId");
+
 				if ( $mac && $request->client ) {
 					# Make sure this notification is for the right client
 
@@ -788,6 +804,7 @@ sub handleRequest {
 
 				$request->source( "$response|$id|$priority|$clid|$ua" );
 
+				# $log->error("subscribe request callback called!");
 				requestCallback( $request );
 			};
 
